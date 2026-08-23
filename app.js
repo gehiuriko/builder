@@ -3,7 +3,8 @@
 
   const API_VERSION = '2026-03-10';
   const WORKFLOW_FILE = 'build-apk.yml';
-  const MAX_ZIP_BYTES = 32 * 1024 * 1024;
+  const MAX_ZIP_BYTES = 256 * 1024 * 1024;
+  const UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
   const $ = (id) => document.getElementById(id);
 
   const el = {
@@ -165,34 +166,85 @@
     refreshConnectionBadge();
   }
 
-  function fileToBase64(file) {
+  function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onerror = () => reject(reader.error || new Error('Gagal membaca ZIP.'));
+      reader.onerror = () => reject(reader.error || new Error('Gagal membaca bagian ZIP.'));
       reader.onload = () => {
         const value = String(reader.result || '');
         const comma = value.indexOf(',');
-        if (comma < 0) return reject(new Error('Gagal mengubah ZIP ke Base64.'));
+        if (comma < 0) return reject(new Error('Gagal mengubah bagian ZIP ke Base64.'));
         resolve(value.slice(comma + 1));
       };
-      reader.readAsDataURL(file);
+      reader.readAsDataURL(blob);
     });
   }
 
+  function textToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    const stride = 0x8000;
+    for (let i = 0; i < bytes.length; i += stride) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + stride));
+    }
+    return btoa(binary);
+  }
+
   async function uploadProject(cfg, id, file) {
-    const path = `jobs/${id}/project.zip`;
-    log(`Membaca ZIP ${fmtBytes(file.size)}…`);
-    const content = await fileToBase64(file);
-    log('Mengirim ZIP ke repository engine private…');
-    const result = await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${path}`, {
-      method: 'PUT',
-      body: {
-        message: `builder: upload ${id}`,
-        content,
-        branch: cfg.branch
+    const base = `jobs/${id}/input`;
+    const uploadedPaths = [];
+    const parts = [];
+    const totalParts = Math.ceil(file.size / UPLOAD_CHUNK_BYTES);
+    log(`Membaca ZIP ${fmtBytes(file.size)} dalam ${totalParts} bagian…`);
+
+    try {
+      for (let i = 0; i < totalParts; i++) {
+        const start = i * UPLOAD_CHUNK_BYTES;
+        const end = Math.min(file.size, start + UPLOAD_CHUNK_BYTES);
+        const slice = file.slice(start, end);
+        const partName = `part-${String(i).padStart(4, '0')}.bin`;
+        const path = `${base}/${partName}`;
+        const content = await blobToBase64(slice);
+        log(`Upload bagian ${i + 1}/${totalParts} (${fmtBytes(slice.size)})…`);
+        await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${path}`, {
+          method: 'PUT',
+          body: {
+            message: `builder: upload ${id} part ${i + 1}/${totalParts}`,
+            content,
+            branch: cfg.branch
+          }
+        });
+        uploadedPaths.push(path);
+        parts.push({ path, size: slice.size });
+        await sleep(250);
       }
-    });
-    return { path, sha: result?.content?.sha || '' };
+
+      const manifestPath = `${base}/manifest.json`;
+      const manifest = {
+        version: 2,
+        job_id: id,
+        file_name: file.name,
+        total_size: file.size,
+        chunk_size: UPLOAD_CHUNK_BYTES,
+        parts
+      };
+      await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${manifestPath}`, {
+        method: 'PUT',
+        body: {
+          message: `builder: upload manifest ${id}`,
+          content: textToBase64(JSON.stringify(manifest, null, 2)),
+          branch: cfg.branch
+        }
+      });
+      uploadedPaths.push(manifestPath);
+      return { path: manifestPath, parts: totalParts };
+    } catch (e) {
+      log(`Upload terhenti: ${e.message}. Membersihkan bagian yang sudah terkirim…`);
+      for (const path of uploadedPaths.reverse()) {
+        try { await deleteFile(cfg, path); } catch (_) {}
+      }
+      throw e;
+    }
   }
 
   async function dispatchBuild(cfg, id, inputPath, variant) {
@@ -234,9 +286,26 @@
   }
 
   async function fetchRaw(cfg, path) {
-    return gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${path}?ref=${encodeURIComponent(cfg.branch)}`, {
-      headers: { 'Accept': 'application/vnd.github.raw+json' }
+    const url = `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${path}?ref=${encodeURIComponent(cfg.branch)}`;
+    const res = await fetch(url, {
+      headers: {
+        'Accept': 'application/vnd.github.raw+json',
+        'Authorization': `Bearer ${cfg.token}`,
+        'X-GitHub-Api-Version': API_VERSION
+      },
+      cache: 'no-store'
     });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const data = await res.clone().json();
+        detail = data.message || JSON.stringify(data);
+      } catch (_) {
+        try { detail = await res.text(); } catch (_) {}
+      }
+      throw new Error(`GitHub ${res.status}: ${detail || res.statusText}`);
+    }
+    return res;
   }
 
   async function waitForStatus(cfg, id) {
