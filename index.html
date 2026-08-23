@@ -97,7 +97,7 @@
 
     <section class="card note-card">
       <h3>GitHub-only</h3>
-      <p>Tidak ada Cloudflare/Worker. Frontend hanya memanggil <b>api.github.com</b>. Untuk v2 web, ZIP dibatasi 32 MB agar upload Base64 tetap stabil di browser HP. Engine repo harus Private.</p>
+      <p>Tidak ada Cloudflare/Worker. Frontend hanya memanggil <b>api.github.com</b>. V2.1 mengupload ZIP bertahap per 16 MB, jadi project hingga 256 MB bisa dikirim tanpa Cloudflare. Engine repo harus Private.</p>
     </section>
   </main>
 
