@@ -7,7 +7,7 @@
 
   const el = {
     settingsButton: $('settingsButton'), setupCard: $('setupCard'), ownerInput: $('ownerInput'), repoInput: $('repoInput'),
-    branchInput: $('branchInput'), tokenInput: $('tokenInput'), rememberTokenInput: $('rememberTokenInput'), testButton: $('testButton'),
+    branchInput: $('branchInput'), tokenInput: $('tokenInput'), proxyInput: $('proxyInput'), rememberTokenInput: $('rememberTokenInput'), testButton: $('testButton'),
     saveButton: $('saveButton'), connectionResult: $('connectionResult'), connectionBadge: $('connectionBadge'), fileInput: $('fileInput'),
     dropZone: $('dropZone'), fileTitle: $('fileTitle'), fileMeta: $('fileMeta'), buildButton: $('buildButton'), statusCard: $('statusCard'),
     statusTitle: $('statusTitle'), statusSubtitle: $('statusSubtitle'), statusBadge: $('statusBadge'), progressBar: $('progressBar'),
@@ -31,6 +31,7 @@
     el.ownerInput.value = saved.owner || '';
     el.repoInput.value = saved.repo || '';
     el.branchInput.value = saved.branch || 'main';
+    el.proxyInput.value = saved.proxyUrl || '';
     el.rememberTokenInput.checked = Boolean(saved.rememberToken);
     const token = saved.rememberToken ? (localStorage.getItem('azb-token') || '') : (sessionStorage.getItem('azb-token') || '');
     el.tokenInput.value = token;
@@ -43,14 +44,16 @@
     const repo = el.repoInput.value.trim();
     const branch = el.branchInput.value.trim() || 'main';
     const token = el.tokenInput.value.trim();
-    if (!owner || !repo || !token) throw new Error('Isi owner, repository, dan GitHub token terlebih dahulu.');
-    return { owner, repo, branch, token };
+    const proxyUrl = el.proxyInput.value.trim().replace(/\/+$/, '');
+    if (!owner || !repo || !token || !proxyUrl) throw new Error('Isi owner, repository, GitHub token, dan URL proxy terlebih dahulu.');
+    if (!/^https:\/\//i.test(proxyUrl)) throw new Error('URL proxy harus memakai HTTPS.');
+    return { owner, repo, branch, token, proxyUrl };
   }
 
   function saveConfig() {
     const cfg = getConfig();
     const rememberToken = el.rememberTokenInput.checked;
-    localStorage.setItem('azb-config', JSON.stringify({ owner: cfg.owner, repo: cfg.repo, branch: cfg.branch, rememberToken }));
+    localStorage.setItem('azb-config', JSON.stringify({ owner: cfg.owner, repo: cfg.repo, branch: cfg.branch, proxyUrl: cfg.proxyUrl, rememberToken }));
     if (rememberToken) {
       localStorage.setItem('azb-token', cfg.token);
       sessionStorage.removeItem('azb-token');
@@ -140,7 +143,11 @@
       const cfg = getConfig();
       const repo = await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`);
       await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/actions/workflows/${WORKFLOW_FILE}`);
-      el.connectionResult.textContent = `OK — ${repo.full_name}, workflow builder ditemukan.`;
+      const proxy = await fetch(`${cfg.proxyUrl}/health`, { cache: 'no-store' });
+      if (!proxy.ok) throw new Error(`Proxy ${proxy.status}: tidak dapat diakses dari halaman builder.`);
+      const proxyInfo = await proxy.json();
+      if (!proxyInfo.ok) throw new Error('Proxy merespons tetapi statusnya tidak sehat.');
+      el.connectionResult.textContent = `OK — ${repo.full_name}, workflow + proxy ditemukan.`;
       saveConfig();
       refreshConnectionBadge();
     } catch (e) {
@@ -180,12 +187,22 @@
   }
 
   async function uploadProject(release, file) {
-    const uploadUrl = release.upload_url.replace('{?name,label}', '') + `?name=${encodeURIComponent('project.zip')}`;
-    return gh(uploadUrl, {
+    const cfg = getConfig();
+    const url = `${cfg.proxyUrl}/upload?owner=${encodeURIComponent(cfg.owner)}&repo=${encodeURIComponent(cfg.repo)}&release_id=${encodeURIComponent(release.id)}`;
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/zip', 'Accept': 'application/vnd.github+json' },
+      headers: {
+        'Authorization': `Bearer ${cfg.token}`,
+        'Content-Type': 'application/zip'
+      },
       body: file
     });
+    if (!res.ok) {
+      let detail = '';
+      try { const j = await res.json(); detail = j.message || JSON.stringify(j); } catch (_) { detail = await res.text(); }
+      throw new Error(`Upload proxy ${res.status}: ${detail || res.statusText}`);
+    }
+    return res.json();
   }
 
   async function dispatchBuild(cfg, id, release, asset, variant) {
@@ -257,13 +274,9 @@
 
   async function downloadAsset(cfg, asset, autoCleanup) {
     log(`Mengunduh ${asset.name}…`);
-    const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases/assets/${asset.id}`, {
-      headers: {
-        'Accept': 'application/octet-stream',
-        'Authorization': `Bearer ${cfg.token}`,
-        'X-GitHub-Api-Version': API_VERSION
-      },
-      redirect: 'follow'
+    const res = await fetch(`${cfg.proxyUrl}/asset?owner=${encodeURIComponent(cfg.owner)}&repo=${encodeURIComponent(cfg.repo)}&asset_id=${encodeURIComponent(asset.id)}`, {
+      headers: { 'Authorization': `Bearer ${cfg.token}` },
+      cache: 'no-store'
     });
     if (!res.ok) throw new Error(`Download APK gagal: GitHub ${res.status}`);
     const blob = await res.blob();
@@ -294,13 +307,9 @@
         const assets = await gh(`/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases/${releaseId}/assets?per_page=100`);
         const logAsset = assets.find(a => a.name === 'build-log.txt');
         if (logAsset) {
-          const res = await fetch(`https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/releases/assets/${logAsset.id}`, {
-            headers: {
-              'Accept': 'application/octet-stream',
-              'Authorization': `Bearer ${cfg.token}`,
-              'X-GitHub-Api-Version': API_VERSION
-            },
-            redirect: 'follow'
+          const res = await fetch(`${cfg.proxyUrl}/asset?owner=${encodeURIComponent(cfg.owner)}&repo=${encodeURIComponent(cfg.repo)}&asset_id=${encodeURIComponent(logAsset.id)}`, {
+            headers: { 'Authorization': `Bearer ${cfg.token}` },
+            cache: 'no-store'
           });
           if (res.ok) {
             const text = await res.text();
@@ -411,7 +420,7 @@
   ['dragleave', 'drop'].forEach(type => el.dropZone.addEventListener(type, (e) => { e.preventDefault(); el.dropZone.classList.remove('drag'); }));
   el.dropZone.addEventListener('drop', (e) => chooseFile(e.dataTransfer?.files?.[0]));
   el.buildButton.addEventListener('click', build);
-  [el.ownerInput, el.repoInput, el.branchInput, el.tokenInput].forEach(input => input.addEventListener('input', refreshConnectionBadge));
+  [el.ownerInput, el.repoInput, el.branchInput, el.tokenInput, el.proxyInput].forEach(input => input.addEventListener('input', refreshConnectionBadge));
 
   loadConfig();
 })();
