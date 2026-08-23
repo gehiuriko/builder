@@ -1,0 +1,295 @@
+name: Universal APK Builder
+run-name: "APK Build ${{ inputs.job_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Browser job ID
+        required: true
+        type: string
+      release_id:
+        description: Temporary draft release ID
+        required: true
+        type: string
+      asset_id:
+        description: Uploaded project ZIP asset ID
+        required: true
+        type: string
+      asset_name:
+        description: Original ZIP file name
+        required: true
+        type: string
+      variant:
+        description: Android build variant
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build Android project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+    steps:
+      - name: Checkout builder scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download uploaded project ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ASSET_ID: ${{ inputs.asset_id }}
+        run: |
+          set -euo pipefail
+          curl --fail --location \
+            -H "Accept: application/octet-stream" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${REPO}/releases/assets/${ASSET_ID}" \
+            --output "${RUNNER_TEMP}/project.zip"
+          test -s "${RUNNER_TEMP}/project.zip"
+          echo "Downloaded $(du -h "${RUNNER_TEMP}/project.zip" | cut -f1) project ZIP"
+
+      - name: Safely extract project
+        run: |
+          set -euo pipefail
+          python3 scripts/safe_extract.py \
+            "${RUNNER_TEMP}/project.zip" \
+            "${RUNNER_TEMP}/project"
+
+      - name: Detect Gradle, AGP, JDK and SDK
+        id: detect
+        run: python3 scripts/detect_toolchain.py "${RUNNER_TEMP}/project"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ steps.detect.outputs.java_version }}
+
+      - name: Setup Gradle cache for project wrapper
+        if: steps.detect.outputs.has_wrapper == 'true'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup fallback Gradle
+        if: steps.detect.outputs.has_wrapper != 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.detect.outputs.gradle_version }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Ensure compileSdk platform exists
+        if: steps.detect.outputs.compile_sdk != ''
+        env:
+          COMPILE_SDK: ${{ steps.detect.outputs.compile_sdk }}
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-${COMPILE_SDK}" "platform-tools"
+
+      - name: Build APK
+        env:
+          PROJECT_ROOT: ${{ steps.detect.outputs.project_root }}
+          HAS_WRAPPER: ${{ steps.detect.outputs.has_wrapper }}
+          BUILD_VARIANT: ${{ inputs.variant }}
+        run: |
+          set -uo pipefail
+          cd "${PROJECT_ROOT}"
+          if [ "${BUILD_VARIANT}" = "release" ]; then
+            TASK="assembleRelease"
+          else
+            TASK="assembleDebug"
+          fi
+
+          LOG="${RUNNER_TEMP}/build.log"
+          echo "Project: ${PROJECT_ROOT}" > "${LOG}"
+          echo "Task: ${TASK}" >> "${LOG}"
+          echo >> "${LOG}"
+
+          if [ "${HAS_WRAPPER}" = "true" ]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon --stacktrace "${TASK}" 2>&1 | tee -a "${LOG}"
+            code=${PIPESTATUS[0]}
+          else
+            gradle --no-daemon --stacktrace "${TASK}" 2>&1 | tee -a "${LOG}"
+            code=${PIPESTATUS[0]}
+          fi
+          exit "${code}"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.job_id }}
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Collect APK files
+        id: meta
+        env:
+          PROJECT_ROOT: ${{ steps.detect.outputs.project_root }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/apk-output"
+          mkdir -p "${OUT}"
+          count=0
+          while IFS= read -r -d '' apk; do
+            count=$((count + 1))
+            rel="${apk#${PROJECT_ROOT}/}"
+            module="${rel%%/build/*}"
+            module="${module//\//-}"
+            base="$(basename "${apk}")"
+            if [ -n "${module}" ] && [ "${module}" != "${rel}" ]; then
+              target="${module}-${base}"
+            else
+              target="${base}"
+            fi
+            # Avoid name collisions from multiple modules/flavors.
+            if [ -e "${OUT}/${target}" ]; then
+              target="${count}-${target}"
+            fi
+            cp "${apk}" "${OUT}/${target}"
+            echo "Collected: ${target}"
+          done < <(find "${PROJECT_ROOT}" -type f -path '*/build/outputs/apk/*' -name '*.apk' ! -name '*unaligned*' -print0)
+
+          if [ "${count}" -eq 0 ]; then
+            echo "No APK was found under */build/outputs/apk/." >&2
+            exit 3
+          fi
+
+          artifact="apk-output-${JOB_ID}"
+          echo "artifact_name=${artifact}" >> "${GITHUB_OUTPUT}"
+          echo "APK_COUNT=${count}" >> "${GITHUB_ENV}"
+
+      - name: Upload internal build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ runner.temp }}/apk-output/*.apk
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Build summary
+        if: always()
+        env:
+          AGP: ${{ steps.detect.outputs.agp_version }}
+          GRADLE: ${{ steps.detect.outputs.gradle_version }}
+          JAVA: ${{ steps.detect.outputs.java_version }}
+          SDK: ${{ steps.detect.outputs.compile_sdk }}
+          WRAPPER: ${{ steps.detect.outputs.has_wrapper }}
+        run: |
+          {
+            echo "### Android ZIP Builder"
+            echo "- AGP: ${AGP:-unknown}"
+            echo "- Gradle: ${GRADLE:-wrapper}"
+            echo "- JDK: ${JAVA:-unknown}"
+            echo "- compileSdk: ${SDK:-unknown}"
+            echo "- Project wrapper: ${WRAPPER:-unknown}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish:
+    name: Make APK downloadable
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ runner.temp }}/apk-output
+
+      - name: Upload APK to private draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          INPUT_ASSET_ID: ${{ inputs.asset_id }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=("${RUNNER_TEMP}/apk-output/"*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No APK files available to publish" >&2
+            exit 4
+          fi
+
+          i=0
+          for apk in "${apks[@]}"; do
+            i=$((i + 1))
+            base="$(basename "${apk}")"
+            clean="$(printf '%s' "${base}" | sed 's/[^A-Za-z0-9._-]/_/g')"
+            safe="result-${i}-${clean}"
+            echo "Publishing ${safe}"
+            curl --fail --location --request POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: application/vnd.android.package-archive" \
+              "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${safe}" \
+              --data-binary "@${apk}" >/dev/null
+          done
+
+          # The source ZIP is no longer needed once result APK(s) exist.
+          curl --fail --request DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${REPO}/releases/assets/${INPUT_ASSET_ID}" >/dev/null
+
+  publish-failure-log:
+    name: Publish failure details
+    needs: build
+    if: always() && needs.build.result != 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build log artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: build-log-${{ inputs.job_id }}
+          path: ${{ runner.temp }}/failure-log
+
+      - name: Publish log and remove source ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          INPUT_ASSET_ID: ${{ inputs.asset_id }}
+        run: |
+          set +e
+          log_file="${RUNNER_TEMP}/failure-log/build.log"
+          if [ -s "${log_file}" ]; then
+            curl --fail --location --request POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: text/plain" \
+              "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=build-log.txt" \
+              --data-binary "@${log_file}" >/dev/null
+          fi
+
+          curl --request DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/${REPO}/releases/assets/${INPUT_ASSET_ID}" >/dev/null
