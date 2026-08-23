@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111318">
+  <title>Android ZIP Builder</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">GITHUB ACTIONS</div>
+        <h1>Android ZIP Builder</h1>
+      </div>
+      <button id="settingsButton" class="icon-button" type="button" aria-label="Pengaturan">⚙</button>
+    </header>
+
+    <section id="setupCard" class="card setup-card hidden">
+      <div class="card-head">
+        <div>
+          <h2>Pengaturan GitHub</h2>
+          <p>Disimpan di perangkat ini. Token hanya disimpan untuk sesi browser kecuali kamu memilih “ingat token”.</p>
+        </div>
+      </div>
+      <div class="grid two">
+        <label>GitHub owner
+          <input id="ownerInput" autocomplete="username" placeholder="username">
+        </label>
+        <label>Repository builder
+          <input id="repoInput" placeholder="android-zip-builder">
+        </label>
+      </div>
+      <div class="grid two">
+        <label>Branch
+          <input id="branchInput" value="main" placeholder="main">
+        </label>
+        <label>Fine-grained PAT
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="github_pat_…">
+        </label>
+      </div>
+      <label class="checkbox-row">
+        <input id="rememberTokenInput" type="checkbox">
+        <span>Ingat token di browser perangkat ini</span>
+      </label>
+      <div class="row actions-row">
+        <button id="testButton" class="button secondary" type="button">Tes koneksi</button>
+        <button id="saveButton" class="button primary" type="button">Simpan</button>
+      </div>
+      <div id="connectionResult" class="micro"></div>
+    </section>
+
+    <section class="card hero-card">
+      <div class="card-head">
+        <div>
+          <h2>Upload project Android</h2>
+          <p>ZIP sementara disimpan sebagai <b>draft release</b>, bukan dimasukkan ke commit history repo.</p>
+        </div>
+        <span id="connectionBadge" class="badge muted">Belum terhubung</span>
+      </div>
+
+      <input id="fileInput" type="file" accept=".zip,application/zip" hidden>
+      <button id="dropZone" class="drop-zone" type="button">
+        <span class="drop-icon">⇧</span>
+        <strong id="fileTitle">Pilih project ZIP</strong>
+        <span id="fileMeta">Tekan di sini atau drop file</span>
+      </button>
+
+      <div class="build-options">
+        <div>
+          <span class="label-title">Variant</span>
+          <div class="segmented" role="group" aria-label="Build variant">
+            <label><input type="radio" name="variant" value="debug" checked><span>Debug</span></label>
+            <label><input type="radio" name="variant" value="release"><span>Release</span></label>
+          </div>
+        </div>
+        <p class="hint">Release dapat tetap unsigned jika project tidak punya signingConfig.</p>
+      </div>
+
+      <button id="buildButton" class="button primary build-button" type="button" disabled>BUILD APK</button>
+    </section>
+
+    <section id="statusCard" class="card hidden">
+      <div class="card-head">
+        <div>
+          <h2 id="statusTitle">Menyiapkan build</h2>
+          <p id="statusSubtitle">Belum ada proses.</p>
+        </div>
+        <span id="statusBadge" class="badge">WAIT</span>
+      </div>
+      <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+      <div id="steps" class="steps"></div>
+      <pre id="logBox" class="log-box"></pre>
+      <div id="resultArea" class="result-area hidden"></div>
+    </section>
+
+    <section class="card note-card">
+      <h3>Privasi build</h3>
+      <p>Frontend ini tidak menaruh token GitHub di source code. Project ZIP berada pada draft release yang hanya dapat dilihat akun dengan akses push ke repo, lalu ZIP dihapus setelah APK berhasil dibuat.</p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
