@@ -40,6 +40,9 @@
           <input id="tokenInput" type="password" autocomplete="off" placeholder="github_pat_…">
         </label>
       </div>
+      <label>Upload/download proxy
+        <input id="proxyInput" type="url" autocomplete="off" placeholder="https://android-zip-builder-proxy.xxxxx.workers.dev">
+      </label>
       <label class="checkbox-row">
         <input id="rememberTokenInput" type="checkbox">
         <span>Ingat token di browser perangkat ini</span>
@@ -97,7 +100,7 @@
 
     <section class="card note-card">
       <h3>Privasi build</h3>
-      <p>Frontend ini tidak menaruh token GitHub di source code. Project ZIP berada pada draft release yang hanya dapat dilihat akun dengan akses push ke repo, lalu ZIP dihapus setelah APK berhasil dibuat.</p>
+      <p>Frontend ini tidak menaruh token GitHub di source code. Upload/download biner diteruskan melalui Cloudflare Worker milikmu untuk menghindari blokir CORS browser. Worker tidak menyimpan token atau ZIP. Project ZIP berada pada draft release lalu dihapus setelah build.</p>
     </section>
   </main>
 
