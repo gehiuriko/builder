@@ -87,4 +87,6 @@ input:focus { border-color: var(--accent-2); }
   .build-options { align-items: flex-start; flex-direction: column; }
   .hint { text-align: left; }
   .card { padding: 16px; }
-  .card-head { align-items: flex-start; }                     
+  .card-head { align-items: flex-start; }
+         }
+                                                           
