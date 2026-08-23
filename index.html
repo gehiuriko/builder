@@ -11,7 +11,7 @@
   <main class="shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">GITHUB ACTIONS</div>
+        <div class="eyebrow">GITHUB-ONLY V2</div>
         <h1>Android ZIP Builder</h1>
       </div>
       <button id="settingsButton" class="icon-button" type="button" aria-label="Pengaturan">⚙</button>
@@ -21,15 +21,15 @@
       <div class="card-head">
         <div>
           <h2>Pengaturan GitHub</h2>
-          <p>Disimpan di perangkat ini. Token hanya disimpan untuk sesi browser kecuali kamu memilih “ingat token”.</p>
+          <p>Tanpa Cloudflare. Project dikirim ke repository engine private melalui GitHub REST API.</p>
         </div>
       </div>
       <div class="grid two">
         <label>GitHub owner
           <input id="ownerInput" autocomplete="username" placeholder="username">
         </label>
-        <label>Repository builder
-          <input id="repoInput" placeholder="android-zip-builder">
+        <label>Repository engine (Private)
+          <input id="repoInput" placeholder="builder-engine">
         </label>
       </div>
       <div class="grid two">
@@ -40,9 +40,6 @@
           <input id="tokenInput" type="password" autocomplete="off" placeholder="github_pat_…">
         </label>
       </div>
-      <label>Upload/download proxy
-        <input id="proxyInput" type="url" autocomplete="off" placeholder="https://android-zip-builder-proxy.xxxxx.workers.dev">
-      </label>
       <label class="checkbox-row">
         <input id="rememberTokenInput" type="checkbox">
         <span>Ingat token di browser perangkat ini</span>
@@ -58,7 +55,7 @@
       <div class="card-head">
         <div>
           <h2>Upload project Android</h2>
-          <p>ZIP sementara disimpan sebagai <b>draft release</b>, bukan dimasukkan ke commit history repo.</p>
+          <p>ZIP masuk sementara ke repo engine <b>Private</b>, lalu dihapus dari branch setelah build. Commit lama tetap dapat tersimpan dalam history Git.</p>
         </div>
         <span id="connectionBadge" class="badge muted">Belum terhubung</span>
       </div>
@@ -78,7 +75,7 @@
             <label><input type="radio" name="variant" value="release"><span>Release</span></label>
           </div>
         </div>
-        <p class="hint">Release dapat tetap unsigned jika project tidak punya signingConfig.</p>
+        <p class="hint">Tes pertama pakai Debug. Release bisa unsigned jika project tidak punya signingConfig.</p>
       </div>
 
       <button id="buildButton" class="button primary build-button" type="button" disabled>BUILD APK</button>
@@ -99,8 +96,8 @@
     </section>
 
     <section class="card note-card">
-      <h3>Privasi build</h3>
-      <p>Frontend ini tidak menaruh token GitHub di source code. Upload/download biner diteruskan melalui Cloudflare Worker milikmu untuk menghindari blokir CORS browser. Worker tidak menyimpan token atau ZIP. Project ZIP berada pada draft release lalu dihapus setelah build.</p>
+      <h3>GitHub-only</h3>
+      <p>Tidak ada Cloudflare/Worker. Frontend hanya memanggil <b>api.github.com</b>. Untuk v2 web, ZIP dibatasi 32 MB agar upload Base64 tetap stabil di browser HP. Engine repo harus Private.</p>
     </section>
   </main>
 
