@@ -1,0 +1,53 @@
+name: Cleanup stale builder uploads
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete builder draft releases older than 24 hours
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import datetime as dt
+          import json
+          import os
+          import subprocess
+
+          repo = os.environ['REPO']
+          token = os.environ['GH_TOKEN']
+          api = f'https://api.github.com/repos/{repo}/releases?per_page=100'
+          data = subprocess.check_output([
+              'curl', '--fail', '--silent', '--location',
+              '-H', 'Accept: application/vnd.github+json',
+              '-H', f'Authorization: Bearer {token}',
+              '-H', 'X-GitHub-Api-Version: 2026-03-10', api
+          ])
+          releases = json.loads(data)
+          now = dt.datetime.now(dt.timezone.utc)
+          for rel in releases:
+              if not rel.get('draft'):
+                  continue
+              if not str(rel.get('tag_name', '')).startswith('builder-upload-'):
+                  continue
+              created = dt.datetime.fromisoformat(rel['created_at'].replace('Z', '+00:00'))
+              if now - created < dt.timedelta(hours=24):
+                  continue
+              rid = rel['id']
+              print(f'Deleting stale draft release {rid}: {rel.get("tag_name")}')
+              subprocess.run([
+                  'curl', '--fail', '--silent', '--request', 'DELETE',
+                  '-H', 'Accept: application/vnd.github+json',
+                  '-H', f'Authorization: Bearer {token}',
+                  '-H', 'X-GitHub-Api-Version: 2026-03-10',
+                  f'https://api.github.com/repos/{repo}/releases/{rid}'
+              ], check=False)
+          PY
