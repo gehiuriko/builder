@@ -339,7 +339,14 @@
 
   async function cleanupJob(cfg, status) {
     const paths = [];
-    if (status?.files) for (const f of status.files) if (f.path) paths.push(f.path);
+    if (status?.files) {
+      for (const f of status.files) {
+        if (f.path) paths.push(f.path);
+        if (Array.isArray(f.parts)) {
+          for (const part of f.parts) if (part?.path) paths.push(part.path);
+        }
+      }
+    }
     if (status?.log_path) paths.push(status.log_path);
     paths.push(`jobs/${currentJobId}/status.json`);
     for (const path of paths) {
@@ -348,38 +355,87 @@
     log('File job pada branch engine sudah dibersihkan.');
   }
 
-  async function downloadPath(cfg, file, status, autoCleanup) {
-    log(`Mengunduh ${file.name}…`);
-    const res = await fetchRaw(cfg, file.path);
-    const blob = await res.blob();
+  function triggerBlobDownload(blob, name) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = file.name || 'app.apk';
+    a.download = name || 'app.apk';
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  async function downloadPath(cfg, file, status, autoCleanup) {
+    const expectedSize = Number(file.size || 0);
+
+    if (Array.isArray(file.parts) && file.parts.length) {
+      log(`Mengunduh ${file.name} dalam ${file.parts.length} bagian…`);
+      const blobs = [];
+      let received = 0;
+
+      for (let i = 0; i < file.parts.length; i++) {
+        const part = file.parts[i];
+        const res = await fetchRaw(cfg, part.path);
+        const blob = await res.blob();
+        const partSize = Number(part.size || 0);
+        if (partSize && blob.size !== partSize) {
+          throw new Error(`Ukuran bagian ${i + 1} tidak cocok: ${blob.size} != ${partSize}`);
+        }
+        blobs.push(blob);
+        received += blob.size;
+        const pct = expectedSize ? Math.round((received / expectedSize) * 100) : Math.round(((i + 1) / file.parts.length) * 100);
+        setStatus('Mengunduh APK', `${file.name} · ${fmtBytes(received)}${expectedSize ? ` / ${fmtBytes(expectedSize)}` : ''}`, 'DOWNLOAD', Math.max(5, Math.min(100, pct)), '');
+        log(`Bagian ${i + 1}/${file.parts.length} selesai (${fmtBytes(blob.size)}).`);
+      }
+
+      const apkBlob = new Blob(blobs, { type: 'application/vnd.android.package-archive' });
+      if (expectedSize && apkBlob.size !== expectedSize) {
+        throw new Error(`Ukuran APK hasil gabung tidak cocok: ${apkBlob.size} != ${expectedSize}`);
+      }
+      triggerBlobDownload(apkBlob, file.name);
+      log(`APK ${file.name} selesai digabung: ${fmtBytes(apkBlob.size)}.`);
+    } else {
+      log(`Mengunduh ${file.name}…`);
+      const res = await fetchRaw(cfg, file.path);
+      const blob = await res.blob();
+      if (expectedSize && blob.size !== expectedSize) {
+        throw new Error(`Ukuran APK tidak cocok: ${blob.size} != ${expectedSize}`);
+      }
+      triggerBlobDownload(blob, file.name);
+    }
+
     if (autoCleanup) await cleanupJob(cfg, status);
   }
 
   function showResults(cfg, status) {
     const files = status.files || [];
+    const downloaded = new Set();
     el.resultArea.classList.remove('hidden');
     el.resultArea.innerHTML = '';
-    files.forEach((file) => {
+    files.forEach((file, index) => {
       const row = document.createElement('div');
       row.className = 'result-row';
-      row.innerHTML = `<span class="name">${escapeHtml(file.name)}</span>`;
+      const detail = `${file.name}${file.size ? ` · ${fmtBytes(Number(file.size))}` : ''}${Array.isArray(file.parts) && file.parts.length ? ` · ${file.parts.length} bagian` : ''}`;
+      row.innerHTML = `<span class="name">${escapeHtml(detail)}</span>`;
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'button primary';
       btn.textContent = 'DOWNLOAD APK';
       btn.addEventListener('click', async () => {
         btn.disabled = true;
-        try { await downloadPath(cfg, file, status, files.length === 1); }
-        catch (e) { alert(e.message); }
-        finally { btn.disabled = false; }
+        try {
+          await downloadPath(cfg, file, status, false);
+          downloaded.add(index);
+          btn.textContent = 'SUDAH DIDOWNLOAD';
+          if (downloaded.size === files.length) {
+            await cleanupJob(cfg, status);
+            log('Semua APK sudah didownload; job dibersihkan otomatis.');
+          }
+        } catch (e) {
+          alert(e.message);
+          btn.disabled = false;
+        }
       });
       row.appendChild(btn);
       el.resultArea.appendChild(row);
@@ -436,30 +492,4 @@
       log(`ERROR: ${e.message}`);
       setStatus('Proses berhenti', e.message, 'ERROR', 100, 'bad');
       if (currentJobId) {
-        try {
-          const cfg = getConfig();
-          const status = await waitForStatus(cfg, currentJobId);
-          await loadFailureLog(cfg, status);
-        } catch (_) {}
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  el.settingsButton.addEventListener('click', () => el.setupCard.classList.toggle('hidden'));
-  el.saveButton.addEventListener('click', () => {
-    try { saveConfig(); el.connectionResult.textContent = 'Pengaturan tersimpan.'; el.setupCard.classList.add('hidden'); }
-    catch (e) { el.connectionResult.textContent = e.message; }
-  });
-  el.testButton.addEventListener('click', testConnection);
-  el.dropZone.addEventListener('click', () => el.fileInput.click());
-  el.fileInput.addEventListener('change', () => chooseFile(el.fileInput.files?.[0]));
-  ['dragenter', 'dragover'].forEach(type => el.dropZone.addEventListener(type, (e) => { e.preventDefault(); el.dropZone.classList.add('drag'); }));
-  ['dragleave', 'drop'].forEach(type => el.dropZone.addEventListener(type, (e) => { e.preventDefault(); el.dropZone.classList.remove('drag'); }));
-  el.dropZone.addEventListener('drop', (e) => chooseFile(e.dataTransfer?.files?.[0]));
-  el.buildButton.addEventListener('click', build);
-  [el.ownerInput, el.repoInput, el.branchInput, el.tokenInput].forEach(input => input.addEventListener('input', refreshConnectionBadge));
-
-  loadConfig();
-})();
+        t
