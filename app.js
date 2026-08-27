@@ -19,6 +19,7 @@
   let selectedFile = null;
   let busy = false;
   let currentJobId = null;
+  const downloadCache = new Map(); // successful chunks kept in RAM for resume
 
   const fmtBytes = (bytes) => {
     const units = ['B', 'KB', 'MB', 'GB'];
@@ -379,26 +380,45 @@
     return new Blob(chunks, { type });
   }
 
-  async function fetchBlobByPath(cfg, path, mime = 'application/octet-stream') {
-    // Do NOT use the large-file raw Contents response here.
-    // First resolve path -> Git blob SHA via the object media type, then fetch the blob
-    // as JSON/base64 entirely through api.github.com. This avoids the fragile raw download
-    // redirect path that can fail as "Failed to fetch" in mobile browsers.
-    const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-    const info = await gh(
-      `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(cfg.branch)}`,
-      { headers: { 'Accept': 'application/vnd.github.object+json' } }
-    );
-    if (!info?.sha) throw new Error(`SHA Git tidak ditemukan untuk ${path}`);
+  function isRetryableDownloadError(error) {
+    const msg = String(error?.message || error || '');
+    if (/GitHub (401|403|404):/i.test(msg)) return false;
+    return /Failed to fetch|NetworkError|Load failed|timeout|GitHub (408|409|425|429|500|502|503|504):/i.test(msg);
+  }
 
-    const data = await gh(
-      `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/git/blobs/${encodeURIComponent(info.sha)}`,
-      { headers: { 'Accept': 'application/vnd.github+json' } }
-    );
-    if (!data?.content || data.encoding !== 'base64') {
-      throw new Error(`Git blob ${path} tidak mengembalikan Base64.`);
+  async function fetchBlobByPath(cfg, path, mime = 'application/octet-stream', attempts = 6) {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+        const info = await gh(
+          `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(cfg.branch)}`,
+          { headers: { 'Accept': 'application/vnd.github.object+json' } }
+        );
+        if (!info?.sha) throw new Error(`SHA Git tidak ditemukan untuk ${path}`);
+
+        const data = await gh(
+          `/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/git/blobs/${encodeURIComponent(info.sha)}`,
+          { headers: { 'Accept': 'application/vnd.github+json' } }
+        );
+        if (!data?.content || data.encoding !== 'base64') {
+          throw new Error(`Git blob ${path} tidak mengembalikan Base64.`);
+        }
+        return base64ToBlob(data.content, mime);
+      } catch (e) {
+        lastError = e;
+        if (!isRetryableDownloadError(e) || attempt >= attempts) break;
+
+        const delay = Math.min(15000, 1200 * (2 ** (attempt - 1)));
+        log(`Koneksi putus saat mengambil bagian. Retry ${attempt}/${attempts - 1} dalam ${(delay / 1000).toFixed(1)} dtk…`);
+        await sleep(delay);
+      }
     }
-    return base64ToBlob(data.content, mime);
+
+    throw new Error(
+      `Gagal mengambil data dari GitHub setelah ${attempts} percobaan: ${lastError?.message || lastError}`
+    );
   }
 
   async function downloadPath(cfg, file, status, autoCleanup) {
@@ -406,28 +426,52 @@
     const mime = 'application/vnd.android.package-archive';
 
     if (Array.isArray(file.parts) && file.parts.length) {
+      const cacheKey = `${status?.job_id || currentJobId || 'job'}::${file.name}`;
+      let cached = downloadCache.get(cacheKey);
+      if (!cached) {
+        cached = new Map();
+        downloadCache.set(cacheKey, cached);
+      }
+
       log(`Mengunduh ${file.name} dalam ${file.parts.length} bagian via Git Blob API…`);
+      if (cached.size) log(`Melanjutkan download: ${cached.size}/${file.parts.length} bagian sudah tersimpan di memori.`);
+
       const blobs = [];
       let received = 0;
 
       for (let i = 0; i < file.parts.length; i++) {
         const part = file.parts[i];
-        setStatus(
-          'Mengunduh APK',
-          `${file.name} · bagian ${i + 1}/${file.parts.length}`,
-          'DOWNLOAD',
-          Math.max(5, Math.round((i / file.parts.length) * 100)),
-          ''
-        );
+        let blob = cached.get(i);
 
-        const blob = await fetchBlobByPath(cfg, part.path);
-        const partSize = Number(part.size || 0);
-        if (partSize && blob.size !== partSize) {
-          throw new Error(`Ukuran bagian ${i + 1} tidak cocok: ${blob.size} != ${partSize}`);
+        if (!blob) {
+          setStatus(
+            'Mengunduh APK',
+            `${file.name} · bagian ${i + 1}/${file.parts.length}`,
+            'DOWNLOAD',
+            Math.max(5, Math.round((i / file.parts.length) * 100)),
+            ''
+          );
+
+          try {
+            blob = await fetchBlobByPath(cfg, part.path);
+          } catch (e) {
+            throw new Error(`Bagian ${i + 1}/${file.parts.length} gagal. ${e.message}`);
+          }
+
+          const partSize = Number(part.size || 0);
+          if (partSize && blob.size !== partSize) {
+            throw new Error(`Ukuran bagian ${i + 1} tidak cocok: ${blob.size} != ${partSize}`);
+          }
+
+          cached.set(i, blob);
+          log(`Bagian ${i + 1}/${file.parts.length} selesai (${fmtBytes(blob.size)}).`);
+        } else {
+          log(`Bagian ${i + 1}/${file.parts.length} sudah tersimpan, dilewati.`);
         }
 
         blobs.push(blob);
         received += blob.size;
+
         const pct = expectedSize
           ? Math.round((received / expectedSize) * 100)
           : Math.round(((i + 1) / file.parts.length) * 100);
@@ -439,15 +483,16 @@
           Math.max(5, Math.min(100, pct)),
           ''
         );
-        log(`Bagian ${i + 1}/${file.parts.length} selesai (${fmtBytes(blob.size)}).`);
-        await sleep(100);
+        await sleep(80);
       }
 
       const apkBlob = new Blob(blobs, { type: mime });
       if (expectedSize && apkBlob.size !== expectedSize) {
         throw new Error(`Ukuran APK hasil gabung tidak cocok: ${apkBlob.size} != ${expectedSize}`);
       }
+
       triggerBlobDownload(apkBlob, file.name);
+      downloadCache.delete(cacheKey);
       log(`APK ${file.name} selesai digabung: ${fmtBytes(apkBlob.size)}.`);
     } else {
       log(`Mengunduh ${file.name} via Git Blob API…`);
