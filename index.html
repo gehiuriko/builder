@@ -11,7 +11,7 @@
   <main class="shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">GITHUB-ONLY V2.2.2</div>
+        <div class="eyebrow">GITHUB-ONLY V2.3</div>
         <h1>Android ZIP Builder</h1>
       </div>
       <button id="settingsButton" class="icon-button" type="button" aria-label="Pengaturan">⚙</button>
@@ -97,10 +97,11 @@
 
     <section class="card note-card">
       <h3>GitHub-only</h3>
-      <p>Tidak ada Cloudflare/Worker. Frontend hanya memanggil <b>api.github.com</b>. V2.2 mengupload ZIP bertahap per 16 MB. APK hasil di atas 64 MB dipecah menjadi bagian 32 MB di repo private lalu digabung otomatis di browser menjadi satu file .apk, sehingga tidak mentok batas 100 MB GitHub Contents API. Engine repo harus Private.</p>
+      <p>Tidak ada Cloudflare/Worker. Frontend hanya memanggil <b>api.github.com</b>. V2.2 mengupload ZIP bertahap per 16 MB. APK besar dipecah menjadi bagian kecil di repo private, diambil lewat Git Blob API, lalu digabung otomatis di browser menjadi satu file .apk, sehingga tidak mentok batas 100 MB GitHub Contents API. Engine repo harus Private.</p>
     </section>
   </main>
 
-  <script src="app.js?v=222fix"></script>
+  <script src="app.js?v=230fix"></script>
 </body>
-</html>
+  </html>
+  
