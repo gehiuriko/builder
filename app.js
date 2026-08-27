@@ -492,4 +492,30 @@
       log(`ERROR: ${e.message}`);
       setStatus('Proses berhenti', e.message, 'ERROR', 100, 'bad');
       if (currentJobId) {
-        t
+        try {
+          const cfg = getConfig();
+          const status = await waitForStatus(cfg, currentJobId);
+          await loadFailureLog(cfg, status);
+        } catch (_) {}
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  el.settingsButton.addEventListener('click', () => el.setupCard.classList.toggle('hidden'));
+  el.saveButton.addEventListener('click', () => {
+    try { saveConfig(); el.connectionResult.textContent = 'Pengaturan tersimpan.'; el.setupCard.classList.add('hidden'); }
+    catch (e) { el.connectionResult.textContent = e.message; }
+  });
+  el.testButton.addEventListener('click', testConnection);
+  el.dropZone.addEventListener('click', () => el.fileInput.click());
+  el.fileInput.addEventListener('change', () => chooseFile(el.fileInput.files?.[0]));
+  ['dragenter', 'dragover'].forEach(type => el.dropZone.addEventListener(type, (e) => { e.preventDefault(); el.dropZone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(type => el.dropZone.addEventListener(type, (e) => { e.preventDefault(); el.dropZone.classList.remove('drag'); }));
+  el.dropZone.addEventListener('drop', (e) => chooseFile(e.dataTransfer?.files?.[0]));
+  el.buildButton.addEventListener('click', build);
+  [el.ownerInput, el.repoInput, el.branchInput, el.tokenInput].forEach(input => input.addEventListener('input', refreshConnectionBadge));
+
+  loadConfig();
+})();
