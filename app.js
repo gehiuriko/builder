@@ -20,6 +20,7 @@
   let busy = false;
   let currentJobId = null;
   const downloadCache = new Map(); // successful chunks kept in RAM for resume
+  let cachedGradleLog = '';
 
   const fmtBytes = (bytes) => {
     const units = ['B', 'KB', 'MB', 'GB'];
@@ -507,11 +508,71 @@
     if (autoCleanup) await cleanupJob(cfg, status);
   }
 
+  async function cacheGradleLog(cfg, status) {
+    cachedGradleLog = '';
+    if (!status?.log_path) return;
+    try {
+      const res = await fetchRaw(cfg, status.log_path);
+      cachedGradleLog = await res.text();
+      log(`Build log siap didownload (${fmtBytes(new Blob([cachedGradleLog]).size)}).`);
+    } catch (e) {
+      log(`Build log tidak bisa dicache: ${e.message}`);
+    }
+  }
+
+  function makeDownloadLogText(status) {
+    const session = el.logBox.textContent || '';
+    const sections = [
+      'Android ZIP Builder log',
+      `Job ID: ${status?.job_id || currentJobId || '-'}`,
+      `State: ${status?.state || '-'}`,
+      `Finished: ${status?.finished_at || '-'}`,
+      '',
+      '===== BUILDER SESSION LOG =====',
+      session.trimEnd(),
+    ];
+    if (cachedGradleLog) {
+      sections.push(
+        '',
+        '===== GRADLE BUILD LOG =====',
+        cachedGradleLog.trimEnd()
+      );
+    } else {
+      sections.push('', '===== GRADLE BUILD LOG =====', '(tidak tersedia di cache)');
+    }
+    return sections.join('\n') + '\n';
+  }
+
+  function addLogDownloadButton(status) {
+    const row = document.createElement('div');
+    row.className = 'result-row';
+
+    const label = document.createElement('span');
+    label.className = 'name';
+    label.textContent = `build-log-${status?.job_id || currentJobId || 'job'}.txt`;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'button secondary';
+    btn.textContent = 'DOWNLOAD LOG';
+    btn.addEventListener('click', () => {
+      const text = makeDownloadLogText(status);
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      triggerBlobDownload(blob, `build-log-${status?.job_id || currentJobId || 'job'}.txt`);
+      log('Log didownload.');
+    });
+
+    row.appendChild(label);
+    row.appendChild(btn);
+    el.resultArea.appendChild(row);
+  }
+
   function showResults(cfg, status) {
     const files = status.files || [];
     const downloaded = new Set();
     el.resultArea.classList.remove('hidden');
     el.resultArea.innerHTML = '';
+    addLogDownloadButton(status);
     files.forEach((file, index) => {
       const row = document.createElement('div');
       row.className = 'result-row';
@@ -585,8 +646,9 @@
       if (!files.length) throw new Error('Build sukses tetapi tidak ada APK pada status hasil.');
       setStatus('APK siap', `${files.length} file APK tersedia.`, 'READY', 100, 'ok');
       log(`APK siap: ${files.map(x => x.name).join(', ')}`);
+      await cacheGradleLog(cfg, status);
       showResults(cfg, status);
-      setStatus('APK siap', `${files.length} file APK tersedia. Tekan DOWNLOAD APK.`, 'READY', 100, 'ok');
+      setStatus('APK siap', `${files.length} file APK tersedia. DOWNLOAD LOG juga tersedia.`, 'READY', 100, 'ok');
     } catch (e) {
       log(`ERROR: ${e.message}`);
       setStatus('Proses berhenti', e.message, 'ERROR', 100, 'bad');
@@ -594,7 +656,11 @@
         try {
           const cfg = getConfig();
           const status = await waitForStatus(cfg, currentJobId);
+          await cacheGradleLog(cfg, status);
           await loadFailureLog(cfg, status);
+          el.resultArea.classList.remove('hidden');
+          el.resultArea.innerHTML = '';
+          addLogDownloadButton(status);
         } catch (_) {}
       }
     } finally {
